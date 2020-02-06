@@ -58,6 +58,45 @@ class CustomThread(threading.Thread):
         pass
 
 
+diskutil_apfs_list_cache = []
+diskutil_list_cache = []
+
+
+def diskutil_list():
+    global diskutil_list_cache
+    if len(diskutil_list_cache)==0:
+        cmd = ['/usr/sbin/diskutil', 'list', '-plist']
+        proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (output, unused_error) = proc.communicate()
+        if proc.returncode:
+            NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+            return volumes
+        try:
+            diskutil_list_cache = plistlib.readPlistFromString(output)
+        except BaseException as e:
+            NSLog(u"Couldn't parse output from %@: %@", u" ".join(cmd), unicode(e))
+    return diskutil_list_cache
+
+def diskutil_apfs_list():
+    global diskutil_apfs_list_cache
+    if len(diskutil_apfs_list_cache)==0:
+        cmd = ['/usr/sbin/diskutil', 'apfs','list', '-plist']
+        proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (output, unused_error) = proc.communicate()
+        if proc.returncode:
+            NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+            return ""
+        try:
+            diskutil_apfs_list_cache = plistlib.readPlistFromString(output)
+        except BaseException as e:
+            NSLog(u"Couldn't parse output from %@: %@", u" ".join(cmd), unicode(e))
+
+    return diskutil_apfs_list_cache
+
 def header_dict_from_list(array):
     """Given a list of strings in http header format, return a dict.
     If array is None, return None"""
@@ -84,7 +123,6 @@ def post_url(url, post_data, message=None, follow_redirects=False,
                'post_data': post_data,
                'additional_headers': header_dict_from_list(additional_headers),
                'logging_function': NSLog}
-    NSLog('gurl options: %@', options)
 
     connection = Gurl.alloc().initWithOptions_(options)
     stored_percent_complete = -1
@@ -98,7 +136,7 @@ def post_url(url, post_data, message=None, follow_redirects=False,
             if message and connection.status and connection.status != 304:
                 # log always, display if verbose is 1 or more
                 # also display in progress field
-                NSLog(message)
+                NSLog('%@', message)
                 if progress_method:
                     progress_method(None, None, message)
                 # now clear message so we don't display it again
@@ -134,8 +172,6 @@ def post_url(url, post_data, message=None, follow_redirects=False,
 
     if connection.error is not None:
         # Gurl returned an error
-        NSLog('Download error %@: %@', connection.error.code(),
-              connection.error.localizedDescription())
         if connection.SSLerror:
             NSLog('SSL error detail: %@', str(connection.SSLerror))
         NSLog('Headers: %@', str(connection.headers))
@@ -173,11 +209,10 @@ def post_url(url, post_data, message=None, follow_redirects=False,
 def NSLogWrapper(message):
     '''A wrapper around NSLog so certain characters sent to NSLog don't '''
     '''trigger string substitution'''
-    NSLog('%@', message)
 
 def get_url(url, destinationpath, message=None, follow_redirects=False,
             progress_method=None, additional_headers=None, username=None,
-            password=None):
+            password=None, resume=False):
     """Gets an HTTP or HTTPS URL and stores it in
     destination path. Returns a dictionary of headers, which includes
     http_result_code and http_result_description.
@@ -197,10 +232,10 @@ def get_url(url, destinationpath, message=None, follow_redirects=False,
                'file': tempdownloadpath,
                'follow_redirects': follow_redirects,
                'additional_headers': header_dict_from_list(additional_headers),
+               'can_resume': resume,
                'username': username,
                'password': password,
                'logging_function': NSLogWrapper}
-    NSLog('gurl options: %@', options)
 
     connection = Gurl.alloc().initWithOptions_(options)
     stored_percent_complete = -1
@@ -214,7 +249,6 @@ def get_url(url, destinationpath, message=None, follow_redirects=False,
             if message and connection.status and connection.status != 304:
                 # log always, display if verbose is 1 or more
                 # also display in progress field
-                NSLog(message)
                 if progress_method:
                     progress_method(None, None, message)
                 # now clear message so we don't display it again
@@ -250,11 +284,8 @@ def get_url(url, destinationpath, message=None, follow_redirects=False,
 
     if connection.error is not None:
         # Gurl returned an error
-        NSLog('Download error %@: %@', connection.error.code(),
-              connection.error.localizedDescription())
         if connection.SSLerror:
             NSLog('SSL error detail: %@', str(connection.SSLerror))
-        NSLog('Headers: %@', str(connection.headers))
         if os.path.exists(tempdownloadpath):
             os.remove(tempdownloadpath)
         raise GurlError(connection.error.code(),
@@ -354,9 +385,36 @@ def downloadFile(url, additional_headers=None, username=None, password=None):
     return data, error
 
 
+def getDMGSize(url):
+    url_parse = urlparse.urlparse(url)
+    error = None
+    error = type("err", (object,), dict())
+    if url_parse.scheme in ['http', 'https']:
+        request = urllib2.Request(url)
+        try:
+            dmg = urllib2.urlopen(request)
+            data = dmg.headers['Content-Length']
+        except (urllib2.URLError, urllib2.HTTPError), err:
+            setattr(error, 'reason', err)
+            data = False
+    else:
+        setattr(error, 'reason', 'The following URL is unsupported')
+        data = False
+
+    setattr(error, 'url', url)
+    return data, error
+
+
 def getPasswordHash(password):
     return hashlib.sha512(password).hexdigest()
 
+# Return the volume path of current working directory
+def currentVolumePath():
+    path = NSBundle.mainBundle().bundlePath()
+    path = os.path.abspath(path)
+    while not os.path.ismount(path):
+       path = os.path.dirname(path)
+    return path
 
 def getPlistData(data):
     # Try the user's homedir
@@ -379,6 +437,17 @@ def getPlistData(data):
     try:
         # NSLog("Trying NetBoot Location")
         plist = FoundationPlist.readPlist(os.path.join("/System", "Installation", "Packages", "com.grahamgilbert.Imagr.plist"))
+        return plist[data]
+    except:
+        pass
+
+    # last chance; look for a file next to the app
+    appPath = NSBundle.mainBundle().bundlePath()
+    appDirPath = os.path.dirname(appPath)
+    try:
+        plistData = open(os.path.join(appDirPath, "com.grahamgilbert.Imagr.plist")).read()
+        plistData = plistData.replace("{{current_volume_path}}", currentVolumePath()).encode("utf8")
+        plist = FoundationPlist.readPlistFromString(plistData)
         return plist[data]
     except:
         pass
@@ -417,7 +486,6 @@ def setDate():
     date_data = None
     time_api_url = 'http://www.apple.com'
 
-    NSLog("Trying to set time with http from %@", time_api_url)
     try:
         request = urllib2.Request(time_api_url)
         request.get_method = lambda : 'HEAD'
@@ -442,7 +510,6 @@ def setDate():
 
 def getServerURL():
     data = getPlistData('serverurl')
-    NSLog('Report: %@', data)
     return data
 
 
@@ -459,14 +526,15 @@ def sendReport(status, message):
     SERIAL = hardware_info.get('serial_number', 'UNKNOWN')
 
     report_url = getReportURL()
+    curr_hostname = hostname()
     if report_url and len(message) > 0:
         # Should probably do some validation on the status at some point
         data = {
+            'hostname':curr_hostname,
             'status': status,
             'serial': SERIAL,
             'message': message
         }
-        NSLog('Report: %@', data)
         data = urllib.urlencode(data)
         # silently fail here, sending reports is a nice to have, if server is
         # down, meh.
@@ -478,7 +546,8 @@ def sendReport(status, message):
     if len(message) > 0:
         log_message = "[{}] {}".format(SERIAL, message)
         log = logging.getLogger("Imagr")
-
+        NSLog(log_message)
+        
         if status == 'error':
             log.error(log_message)
         else:
@@ -612,7 +681,6 @@ def mountdmg(dmgpath):
     Attempts to mount the dmg at dmgpath
     and returns a list of mountpoints
     """
-    NSLog("Mounting disk image %@", dmgpath)
     mountpoints = []
     dmgname = os.path.basename(dmgpath)
     cmd = ['/usr/bin/hdiutil', 'attach', dmgpath, '-nobrowse', '-plist',
@@ -627,7 +695,6 @@ def mountdmg(dmgpath):
         for entity in plist['system-entities']:
             if 'mount-point' in entity:
                 mountpoints.append(entity['mount-point'])
-        NSLog("Mount successful at %@", mountpoints)
 
     return mountpoints
 
@@ -656,22 +723,22 @@ def unmountdmg(mountpoint):
         return True
 
 
-def downloadChunks(url, file, progress_method=None, additional_headers=None):
+def downloadChunks(url, file, progress_method=None, additional_headers=None, resume=False):
     message = "Downloading %s" % os.path.basename(url)
     url_parse = urlparse.urlparse(url)
     if url_parse.scheme in ['http', 'https']:
         # Use gurl to download the file
         try:
-            headers = get_url(url, file, message=message,
+            headers = get_url(url, file, message=message, resume=resume,
                               progress_method=progress_method,
                               additional_headers=additional_headers)
             return file, None
-        except HTTPError, err:
-            NSLog("HTTP Error: %@", err)
-            return False, err
-        except GurlError, err:
-            NSLog("Gurl Error: %@", err)
-            return False, err
+        except HTTPError, error:
+            NSLog("HTTP Error: %@", error)
+            return False, error
+        except GurlError, error:
+            NSLog("Gurl Error: %@", error)
+            return False, error
     elif url_parse.scheme == 'file':
         # File resources should be handled natively. Space characters, %20,
         # need to be removed
@@ -702,7 +769,7 @@ def copyFirstBoot(root, network=True, reboot=True):
     config_plist['Network'] = network
     config_plist['RetryCount'] = retry_count
     config_plist['Reboot'] = reboot
-    firstboot_dir = 'usr/local/first-boot'
+    firstboot_dir = 'private/var/.imagr/first-boot'
     if not os.path.exists(os.path.join(root, firstboot_dir)):
         os.makedirs(os.path.join(root, firstboot_dir))
     plistlib.writePlist(config_plist, os.path.join(root, firstboot_dir,
@@ -712,7 +779,8 @@ def copyFirstBoot(root, network=True, reboot=True):
     script_dir = os.path.dirname(os.path.realpath(__file__))
     launchDaemon_dir = os.path.join(root, 'Library', 'LaunchDaemons')
     if not os.path.exists(launchDaemon_dir):
-        os.makedirs(launchDaemon_dir)
+        os.makedirs(launchDaemon_dir, 0755)
+        os.chown(launchDaemon_dir, 0, 0)
 
     if not os.path.exists(os.path.join(launchDaemon_dir,
     'com.grahamgilbert.imagr-first-boot-pkg.plist')):
@@ -727,7 +795,8 @@ def copyFirstBoot(root, network=True, reboot=True):
 
     launchAgent_dir = os.path.join(root, 'Library', 'LaunchAgents')
     if not os.path.exists(launchAgent_dir):
-        os.makedirs(launchAgent_dir)
+        os.makedirs(launchAgent_dir, 0755)
+        os.chown(launchAgent_dir, 0, 0)
 
     if not os.path.exists(os.path.join(launchAgent_dir, 'se.gu.it.LoginLog.plist')):
         shutil.copy(os.path.join(script_dir, 'se.gu.it.LoginLog.plist'),
@@ -745,7 +814,8 @@ def copyFirstBoot(root, network=True, reboot=True):
 
     helperTools_dir = os.path.join(root, 'Library', 'PrivilegedHelperTools')
     if not os.path.exists(helperTools_dir):
-        os.makedirs(helperTools_dir)
+        os.makedirs(helperTools_dir, 0755)
+        os.chown(helperTools_dir, 0, 0)
 
     if not os.path.exists(os.path.join(helperTools_dir, 'LoginLog.app')):
         shutil.copytree(os.path.join(script_dir, 'LoginLog.app'),
@@ -794,12 +864,135 @@ def is_apfs(source):
     except Exception as e:
         NSLog(u"Failed to get disk image format %@", str(e))
         return isApfs
-    NSLog(u"Result of isApfs is %@", str(isApfs))
     return isApfs
+
 def mountedVolumes():
     """Return an array with information dictionaries for each mounted volume."""
     volumes = []
-    cmd = ['/usr/sbin/diskutil', 'list', '-plist']
+    plist =  diskutil_list()
+    volumeNames = plist[u"VolumesFromDisks"]
+    for disk in plist[u"AllDisksAndPartitions"]:
+        if (u"MountPoint" in disk) and (not disk[u"MountPoint"].startswith("/private/var")) and (disk.get(u"VolumeName") in volumeNames):
+            volumes.append(macdisk.Disk(disk[u"DeviceIdentifier"]))
+        for part in disk.get(u"Partitions", []):
+            if ((u"MountPoint" in part) and (not part[u"MountPoint"].startswith("/private/var")) and (part.get(u"VolumeName") in volumeNames)) :
+                volumes.append(macdisk.Disk(part[u"DeviceIdentifier"]))
+
+#         volumes = [disk for disk in volumes if not disk.mountpoint in APFSVolumesToHide]
+#         print volumes
+
+
+    
+    return volumes
+
+def mounted_apfs_volumes():
+    volumes = []
+    plist = diskutil_list()
+    volumeNames = plist[u"VolumesFromDisks"]
+    for disk in plist[u"AllDisksAndPartitions"]:
+        for part in disk.get(u"APFSVolumes", []):
+            if (u"MountPoint" in part) and (not part[u"MountPoint"].startswith("/private/var")) and (part.get(u"VolumeName") in volumeNames) :
+                    volumes.append(part[u"DeviceIdentifier"])
+
+    return volumes
+
+def data_volume(source) :
+
+    newDisk=source
+    if (source._attributes['FilesystemType'] == 'apfs'):
+        container_reference=source._attributes['ParentWholeDisk']
+        plist = diskutil_apfs_list()
+
+        if (plist==""):
+            return newDisk
+        for container in plist[u"Containers"]:
+            if (container[u"ContainerReference"]!=container_reference):
+                continue
+            for volume in container[u"Volumes"]:
+                if ((u"Roles" in volume) and (u"Data" in volume["Roles"])):
+                    newDisk=macdisk.Disk(volume[u"DeviceIdentifier"])
+                    newDisk.Refresh()
+    return newDisk
+
+def system_volume(source):
+    newDisk=source
+    if (source._attributes['FilesystemType'] == 'apfs'):
+        container_reference=source._attributes['ParentWholeDisk']
+        plist = diskutil_apfs_list()
+
+        if (plist==""):
+            return newDisk
+        for container in plist[u"Containers"]:
+            if (container[u"ContainerReference"]!=container_reference):
+                continue
+            for volume in container[u"Volumes"]:
+                if ((u"Roles" in volume) and (u"System" in volume["Roles"])):
+                    newDisk=macdisk.Disk(volume[u"DeviceIdentifier"])
+                    newDisk.Refresh()
+    return newDisk
+
+
+def hostname():
+    hostname="Unknown"
+    cmd = ['/bin/hostname','-s']
+    proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (hostname, unused_error) = proc.communicate()
+
+    if proc.returncode:
+        NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+        return hostname
+
+    return hostname.rstrip('\r\n')
+
+
+def available_volumes():
+    global diskutil_list_cache
+    global diskutil_apfs_list_cache
+
+    diskutil_list_cache=[]
+    diskutil_apfs_list_cache=[]
+    volumes=available_apfs_volumes()
+    volumes.extend(cs_filevault_volumes())
+    volumes.extend(mountedVolumes())
+    return volumes
+
+def available_apfs_volumes():
+
+    volumes = []
+    plist = diskutil_apfs_list()
+    if (plist==""):
+        return volumes
+    mount_vols=mounted_apfs_volumes()
+    for container in plist[u"Containers"]:
+        for volume in container[u"Volumes"]:
+            if ((u"FileVault" in volume) and (volume["FileVault"]==True) or (volume[u"DeviceIdentifier"] in mount_vols and (u"Roles" in volume) and (not u"Data" in volume["Roles"]))):
+                newDisk=macdisk.Disk(volume[u"DeviceIdentifier"])
+                if (u"FileVault" in volume) and (volume["FileVault"]==True):
+                    newDisk.filevault=True
+                newDisk.Refresh()
+                volumes.append(newDisk)
+
+    return volumes
+def apfs_filevault_volumes():
+
+    volumes = []
+    plist = diskutil_apfs_list()
+
+    if (plist==""):
+        volumes
+    for container in plist[u"Containers"]:
+        for volume in container[u"Volumes"]:
+            if (u"FileVault" in volume) and (volume["FileVault"]==True):
+                newDisk=macdisk.Disk(volume[u"DeviceIdentifier"])
+                newDisk.filevault=True
+                newDisk.Refresh()
+                volumes.append(newDisk)
+    return volumes
+
+def apfs_volume_uuid(device):
+    cmd = ['/usr/sbin/diskutil', 'info','-plist',device]
     proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
                             stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -810,21 +1003,146 @@ def mountedVolumes():
 
     try:
         plist = plistlib.readPlistFromString(output)
-        volumeNames = plist[u"VolumesFromDisks"]
-        for disk in plist[u"AllDisksAndPartitions"]:
-            if (u"MountPoint" in disk) and (disk.get(u"VolumeName") in volumeNames):
-                volumes.append(macdisk.Disk(disk[u"DeviceIdentifier"]))
-            for part in disk.get(u"Partitions", []):
-                if (u"MountPoint" in part) and (part.get(u"VolumeName") in volumeNames):
-                    volumes.append(macdisk.Disk(part[u"DeviceIdentifier"]))
-            for part in disk.get(u"APFSVolumes", []):
-                if (u"MountPoint" in part) and (part.get(u"VolumeName") in volumeNames):
-                    volumes.append(macdisk.Disk(part[u"DeviceIdentifier"]))
-        # print volumes
-        # volumes = [disk for disk in volumes if not disk.mountpoint in APFSVolumesToHide]
-        # print volumes
-
     except BaseException as e:
         NSLog(u"Couldn't parse output from %@: %@", u" ".join(cmd), unicode(e))
 
+    return plist[u'VolumeUUID']
+
+
+def apfs_container(volume_uuid):
+    plist = diskutil_apfs_list()
+
+    if (plist==""):
+        return ""
+    for container in plist[u"Containers"]:
+        for volume in container[u"Volumes"]:
+            if volume[u"APFSVolumeUUID"]==volume_uuid:
+                return container[u"APFSContainerUUID"]
+
+def first_apfs_volume(apfs_container_uuid):
+    ret_disk=None
+    plist=diskutil_apfs_list()
+
+    if (plist==""):
+        return None
+    try:
+        new_device=plist[u"Containers"][0][u"Volumes"][0][u"DeviceIdentifier"]
+        ret_disk=macdisk.Disk(new_device)
+    except BaseException as e:
+        NSLog(u"Couldn't get new device from %@",apfs_container_uuid)
+
+    return ret_disk
+
+
+def reset_apfs_container(device,new_volume_name=u"Macintosh HD"):
+
+    apfs_vol_uuid=apfs_volume_uuid(device)
+    apfs_container_uuid=apfs_container(apfs_vol_uuid)
+    first_vol=None
+
+    if apfs_container_uuid:
+        cmd = ['/usr/sbin/diskutil', 'apfs', 'list','-plist',apfs_container_uuid]
+        proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        (output, unused_error) = proc.communicate()
+        if proc.returncode:
+            NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+            
+
+        try:
+            plist = plistlib.readPlistFromString(output)
+        except BaseException as e:
+            NSLog(u"Couldn't parse output from %@: %@", u" ".join(cmd), unicode(e))
+        
+        NSLog(u"deleting volumes");
+        for container in plist[u"Containers"]:
+            for volume in container[u"Volumes"]:
+                apfs_delete_volume(volume[u"APFSVolumeUUID"])
+
+        NSLog(u"adding volume named %@ to container UUID %@", new_volume_name,apfs_container_uuid)
+        apfs_add_volume(apfs_container_uuid, new_volume_name)
+        NSLog(u"finding first volume in container %@",apfs_container_uuid)
+        diskutil_list_cache=""
+        diskutil_apfs_list=""
+        first_vol=first_apfs_volume(apfs_container_uuid)
+
+    return first_vol
+
+        
+
+
+def apfs_add_volume(apfs_container_uuid,new_name):
+
+    cmd = ['/usr/sbin/diskutil', 'apfs', 'addVolume',apfs_container_uuid,"apfs",new_name]
+    proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (output, unused_error) = proc.communicate()
+    if proc.returncode:
+        NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+
+
+def apfs_delete_volume(apfs_volume_uuid):
+
+    cmd = ['/usr/sbin/diskutil', 'apfs', 'deleteVolume',apfs_volume_uuid]
+    proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (output, unused_error) = proc.communicate()
+    if proc.returncode:
+        NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+
+def cs_filevault_volumes():
+
+    volumes = []
+    cmd = ['/usr/sbin/diskutil', 'cs', 'list','-plist']
+    proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                            stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (output, unused_error) = proc.communicate()
+    if proc.returncode:
+        NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+        return volumes
+    try:
+        plist = plistlib.readPlistFromString(output)
+    except BaseException as e:
+        NSLog(u"Couldn't parse output from %@: %@", u" ".join(cmd), unicode(e))
+
+    if "CoreStorageLogicalVolumeGroups" in plist:
+        for logicalVolumeGroup in plist[u"CoreStorageLogicalVolumeGroups"]:
+            for logicalVolumeFamily in logicalVolumeGroup[u"CoreStorageLogicalVolumeFamilies"]:
+                for logicalVolume in logicalVolumeFamily[u"CoreStorageLogicalVolumes"]:
+                    coreStorageUUID=logicalVolume["CoreStorageUUID"]
+                    logicalVolumeInfo=cs_volume_info(coreStorageUUID)
+                    if (logicalVolumeInfo["CoreStorageLogicalVolumeStatus"]=='Locked'):
+                        newDisk=macdisk.Disk(logicalVolumeInfo[u"DesignatedCoreStoragePhysicalVolumeDeviceIdentifier"])
+                        newDisk.filevault=True
+                        newDisk.Refresh()
+                        volumes.append(newDisk)
+                    else:
+                        NSLog("Not locked")
+
     return volumes
+
+
+
+
+
+def cs_volume_info(cs_disk_id):
+
+    cmd = ['/usr/sbin/diskutil', 'cs', 'info','-plist',cs_disk_id]
+    proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (output, unused_error) = proc.communicate()
+    if proc.returncode:
+        NSLog(u"%@ failed with return code %d", u" ".join(cmd), proc.returncode)
+        return volumes
+
+    try:
+        plist = plistlib.readPlistFromString(output)
+    except BaseException as e:
+        NSLog(u"Couldn't parse output from %@: %@", u" ".join(cmd), unicode(e))
+
+    return plist

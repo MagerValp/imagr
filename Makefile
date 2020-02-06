@@ -4,7 +4,7 @@
 
 URL="http://192.168.178.135/imagr_config.plist"
 REPORTURL=none
-APP="/Applications/Install macOS Sierra.app"
+APP="/Applications/Install macOS High Sierra.app"
 OUTPUT=~/Desktop
 NBI="Imagr"
 DMGPATH=none
@@ -79,9 +79,10 @@ dmg: build
 	cp -R ./build/Release/Imagr.app /tmp/imagr-build
 	cp ./validateplist /tmp/imagr-build/Tools
 	cp ./get_locale /tmp/imagr-build/Tools
+	cp -R ./rc-imaging /tmp/imagr-build/Tools
 	chmod +x /tmp/imagr-build/Tools/validateplist
 	chmod +x /tmp/imagr-build/Tools/get_locale
-	hdiutil create -srcfolder /tmp/imagr-build -volname "Imagr" -format UDZO -o Imagr.dmg
+	hdiutil create -srcfolder /tmp/imagr-build -volname "Imagr" -fs HFS+ -format UDZO -o Imagr.dmg
 	mv Imagr.dmg \
 		"Imagr-$(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "./build/Release/Imagr.app/Contents/Info.plist").dmg"
 	rm -rf /tmp/imagr-build
@@ -115,10 +116,13 @@ endif
 pkg-dir:
 	mkdir -p Packages/Extras
 ifeq ($(STARTTERMINAL),True)
-	printf '%s\n%s' '#!/bin/bash' '/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal' > Packages/Extras/rc.imaging
+	cp ./rc-imaging/terminal Packages/Extras/rc.imaging
+	cp -r /Applications/Utilities/Console.app ./Packages
+else ifeq ($(STARTTERMINAL),Custom)
+	cp ./rc-imaging/custom Packages/Extras/rc.imaging
 	cp -r /Applications/Utilities/Console.app ./Packages
 else
-	printf '%s\n%s' '#!/bin/bash' '/System/Installation/Packages/Imagr.app/Contents/MacOS/Imagr' > Packages/Extras/rc.imaging
+	cp ./rc-imaging/imagr Packages/Extras/rc.imaging
 endif
 	cp ./com.grahamgilbert.Imagr.plist Packages/
 ifeq ($(BUILD),Release)
